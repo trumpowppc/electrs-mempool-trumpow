@@ -1,4 +1,4 @@
-# Electrs-Mempool-Pepecoin - Electrs backend API
+# electrs-mempool-trumpow - Electrs backend API
 
 ## Run with Docker Compose
 
@@ -9,9 +9,9 @@ docker compose up -d
 ## Build & Run from Source
 
 ```bash
-$ git clone --recurse-submodules https://github.com/PepeEnthusiast/electrs-mempool-pepecoin.git
-$ cd electrs-mempool-pepecoin
-$ cargo run --release --bin electrs -- -vvvv --jsonrpc-import --daemon-dir ~/.pepecoin --daemon-rpc-addr 127.0.0.1:33873 --cookie user:pass
+$ git clone --recurse-submodules https://github.com/trumpowppc/electrs-mempool-trumpow.git
+$ cd electrs-mempool-trumpow
+$ cargo run --release --bin electrs -- -vvvv --jsonrpc-import --daemon-dir ~/.trumpow --daemon-rpc-addr 127.0.0.1:33883 --cookie user:pass
 ```
 
 # Mempool - Electrs backend API
