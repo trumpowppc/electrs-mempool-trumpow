@@ -746,7 +746,12 @@ fn handle_request(
 
         (&Method::GET, Some(&"blocks"), start_height, None, None, None) => {
             let start_height = start_height.and_then(|height| height.parse::<usize>().ok());
-            blocks(query, config, start_height)
+            let limit = query_params
+                .get("limit")
+                .and_then(|limit| limit.parse::<usize>().ok())
+                .unwrap_or(10);
+            let limit = std::cmp::min(limit, config.rest_default_block_limit);
+            blocks(query, limit, start_height)
         }
         (&Method::GET, Some(&"block-height"), Some(height), None, None, None) => {
             let height = height.parse::<usize>()?;
@@ -837,15 +842,15 @@ fn handle_request(
                 .chain()
                 .get_block_txids(&hash)
                 .ok_or_else(|| HttpError::not_found("Block not found".to_string()))?;
+            let max_txs = query_params
+                .get("max_txs")
+                .and_then(|s| s.parse::<usize>().ok())
+                .unwrap_or(config.rest_default_chain_txs_per_page);
+            let max_txs = std::cmp::min(max_txs, config.rest_default_chain_txs_per_page);
 
             let start_index = start_index.map_or(0u32, |el| el.parse().unwrap_or(0)) as usize;
             if start_index >= txids.len() {
                 bail!(HttpError::not_found("start index out of range".to_string()));
-            } else if start_index % config.rest_default_chain_txs_per_page != 0 {
-                bail!(HttpError::from(format!(
-                    "start index must be a multipication of {}",
-                    config.rest_default_chain_txs_per_page
-                )));
             }
 
             // blockid_by_hash() only returns the BlockId for non-orphaned blocks,
@@ -855,7 +860,7 @@ fn handle_request(
             let txs = txids
                 .iter()
                 .skip(start_index)
-                .take(config.rest_default_chain_txs_per_page)
+                .take(max_txs)
                 .map(|txid| {
                     query
                         .lookup_txn(txid)
@@ -903,6 +908,7 @@ fn handle_request(
                 .get("max_txs")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_max_mempool_txs);
+            let max_txs = std::cmp::min(max_txs, config.rest_default_max_mempool_txs);
             let after_txid = query_params
                 .get("after_txid")
                 .and_then(|s| s.parse::<Txid>().ok());
@@ -1010,6 +1016,7 @@ fn handle_request(
                 .get("max_txs")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_max_mempool_txs);
+            let max_txs = std::cmp::min(max_txs, config.rest_default_max_mempool_txs);
             let after_txid = query_params
                 .get("after_txid")
                 .and_then(|s| s.parse::<Txid>().ok());
@@ -1103,6 +1110,7 @@ fn handle_request(
                 .get("max_txs")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_chain_txs_per_page);
+            let max_txs = std::cmp::min(max_txs, config.rest_default_chain_txs_per_page);
 
             let mut txs = query
                 .chain()
@@ -1149,6 +1157,7 @@ fn handle_request(
                 .get("max_txs")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_chain_txs_per_page);
+            let max_txs = std::cmp::min(max_txs, config.rest_default_chain_txs_per_page);
 
             let mut txs = query
                 .chain()
@@ -1198,6 +1207,7 @@ fn handle_request(
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(config.rest_default_max_address_summary_txs),
             );
+            let max_txs = std::cmp::min(max_txs, config.rest_default_max_address_summary_txs);
 
             let last_seen_txid_location = if let Some(txid) = &last_seen_txid {
                 find_txid(txid, &query.mempool(), query.chain())
@@ -1279,6 +1289,7 @@ fn handle_request(
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(config.rest_default_max_address_summary_txs),
             );
+            let max_txs = std::cmp::min(max_txs, config.rest_default_max_address_summary_txs);
 
             let last_seen_txid_location = if let Some(txid) = &last_seen_txid {
                 find_txid(txid, &query.mempool(), query.chain())
@@ -1327,6 +1338,7 @@ fn handle_request(
                 .get("max_txs")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_default_max_mempool_txs);
+            let max_txs = std::cmp::min(max_txs, config.rest_default_max_mempool_txs);
 
             let txs = query
                 .mempool()
@@ -1732,6 +1744,7 @@ fn handle_request(
                 .get("max_txs")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_max_mempool_txid_page_size);
+            let max_txs = std::cmp::min(max_txs, config.rest_max_mempool_txid_page_size);
             json_response(
                 query.mempool().txids_page(max_txs, last_seen_txid),
                 TTL_SHORT,
@@ -1790,6 +1803,7 @@ fn handle_request(
                 .get("max_txs")
                 .and_then(|s| s.parse::<usize>().ok())
                 .unwrap_or(config.rest_max_mempool_page_size);
+            let max_txs = std::cmp::min(max_txs, config.rest_max_mempool_page_size);
             let txs = query
                 .mempool()
                 .txs_page(max_txs, last_seen_txid)
@@ -2012,7 +2026,7 @@ fn json_response<T: Serialize>(value: T, ttl: u32) -> Result<Response<Body>, Htt
 
 fn blocks(
     query: &Query,
-    config: &Config,
+    limit: usize,
     start_height: Option<usize>,
 ) -> Result<Response<Body>, HttpError> {
     let mut values = Vec::new();
@@ -2026,7 +2040,7 @@ fn blocks(
     };
 
     let zero = [0u8; 32];
-    for _ in 0..config.rest_default_block_limit {
+    for _ in 0..limit {
         let blockhm = query
             .chain()
             .get_block_with_meta(&current_hash)

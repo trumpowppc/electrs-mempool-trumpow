@@ -26,9 +26,9 @@ services:
       --network testnet
       --jsonrpc-import
       --precache-stats
+      --precache-utxos
       --address-search
       --index-unspendables
-      --rest-default-chain-txs-per-page 10
       --daemon-rpc-addr core:44873
       --daemon-dir /.pepecoin
       --cookie rpc:rpcp

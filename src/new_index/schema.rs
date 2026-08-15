@@ -47,7 +47,8 @@ pub struct Store {
     // TODO: should be column families
     txstore_db: DB,
     history_db: DB,
-    cache_db: DB,
+    stats_cache_db: DB,
+    utxos_cache_db: DB,
     addresses_db: DB,
     tx_index_db: DB,
     added_blockhashes: RwLock<HashSet<BlockHash>>,
@@ -65,7 +66,8 @@ impl Store {
         let indexed_blockhashes = load_blockhashes(&history_db, &BlockRow::done_filter());
         debug!("{} blocks were indexed", indexed_blockhashes.len());
 
-        let cache_db = DB::open(&path.join("cache"), config);
+        let stats_cache_db = DB::open(&path.join("stats_cache"), config);
+        let utxos_cache_db = DB::open(&path.join("utxos_cache"), config);
 
         let addresses_db = DB::open(&path.join("addresses"), config);
 
@@ -87,7 +89,8 @@ impl Store {
         Store {
             txstore_db,
             history_db,
-            cache_db,
+            stats_cache_db,
+            utxos_cache_db,
             addresses_db,
             tx_index_db,
             added_blockhashes: RwLock::new(added_blockhashes),
@@ -104,8 +107,12 @@ impl Store {
         &self.history_db
     }
 
-    pub fn cache_db(&self) -> &DB {
-        &self.cache_db
+    pub fn stats_cache_db(&self) -> &DB {
+        &self.stats_cache_db
+    }
+    
+    pub fn utxos_cache_db(&self) -> &DB {
+        &self.utxos_cache_db
     }
 
     pub fn addresses_db(&self) -> &DB {
@@ -333,11 +340,13 @@ impl Indexer {
         let scripts = rx.into_iter().collect::<HashSet<_>>();
         for script in scripts {
             // cancel the script cache DB for these scripts. They might get incorrect data mixed in.
-            self.store.cache_db.delete(vec![
+            self.store.stats_cache_db.delete(vec![
                 StatsCacheRow::key(&script),
-                UtxoCacheRow::key(&script),
                 #[cfg(feature = "liquid")]
                 [b"z", &script[..]].concat(), // asset cache key
+            ]);
+            self.store.utxos_cache_db.delete(vec![
+                UtxoCacheRow::key(&script),
             ]);
         }
         Ok(())
@@ -397,6 +406,10 @@ impl Indexer {
         start_fetcher(self.from, &daemon, to_index)?
             .map(|blocks| self.index(&blocks, Operation::AddBlocks, chain));
         self.start_auto_compactions(&self.store.history_db);
+        self.start_auto_compactions(&self.store.addresses_db);
+        self.start_auto_compactions(&self.store.tx_index_db);
+        self.start_auto_compactions(&self.store.stats_cache_db);
+        self.start_auto_compactions(&self.store.utxos_cache_db);
 
         if let DBFlush::Disable = self.flush {
             debug!("flushing to disk");
@@ -404,7 +417,8 @@ impl Indexer {
             self.store.history_db.flush();
             self.store.addresses_db.flush();
             self.store.tx_index_db.flush();
-            self.store.cache_db.flush();
+            self.store.stats_cache_db.flush();
+            self.store.utxos_cache_db.flush();
             self.flush = DBFlush::Enable;
         }
 
@@ -544,11 +558,15 @@ impl Indexer {
             }
         };
 
+        let mut compact = false;
         let (rows, addresses_rows, tx_index_rows, precache_all) = {
             let _timer = self.start_timer("index_process");
             if let Operation::AddBlocks = op {
                 let added_blockhashes = self.store.added_blockhashes.read().unwrap();
                 for b in blocks {
+                    if b.entry.height() % 25000 == 0 {
+                        compact = true;
+                    }
                     if b.entry.height() % 100 == 0 {
                         info!("History indexing is up to height={}", b.entry.height());
                     }
@@ -576,18 +594,49 @@ impl Indexer {
         }
 
         let uniq: std::collections::HashSet<_> = precache_all.into_iter().collect();
-        let pool = rayon::ThreadPoolBuilder::new()
+        rayon::ThreadPoolBuilder::new()
             .num_threads(20)
             .build()
-            .unwrap();
-
-        pool.install(|| {
+            .unwrap()
+            .install(|| {
             uniq.into_par_iter().for_each(|script_hash| {
                 self.precache(script_hash, chain);
             });
         });
 
-        chain.store().cache_db().flush();
+        if compact {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(4)
+                .build()
+                .unwrap()
+                .install(|| {
+                rayon::join(
+                    || chain.store().tx_index_db().full_compaction(),
+                    || rayon::join(
+                        || chain.store().addresses_db().full_compaction(),
+                        || rayon::join(
+                            || chain.store().stats_cache_db().full_compaction(),
+                            || chain.store().utxos_cache_db().full_compaction(),
+                    )),
+                );
+            });
+        }
+
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(|| {
+            rayon::join(
+                || chain.store().tx_index_db().flush(),
+                || rayon::join(
+                    || chain.store().addresses_db().flush(),
+                    || rayon::join(
+                        || chain.store().stats_cache_db().flush(),
+                        || chain.store().utxos_cache_db().flush(),
+                )),
+            );
+        });
     }
 }
 
@@ -1121,7 +1170,7 @@ impl ChainQuery {
         // invalidates the cache if the block was orphaned.
         let cache: Option<(UtxoMap, usize)> = self
             .store
-            .cache_db
+            .utxos_cache_db
             .get(&UtxoCacheRow::key(scripthash))
             .map(|c| bincode_util::deserialize_little(&c).unwrap())
             .and_then(|(utxos_cache, blockhash)| {
@@ -1133,14 +1182,14 @@ impl ChainQuery {
 
         // update utxo set with new transactions since
         let (newutxos, lastblock, processed_items) = cache.map_or_else(
-            || self.utxo_delta(scripthash, HashMap::new(), 0, limit),
-            |(oldutxos, blockheight)| self.utxo_delta(scripthash, oldutxos, blockheight + 1, limit),
+            || self.utxo_delta(scripthash, HashMap::new(), 0, usize::MAX),
+            |(oldutxos, blockheight)| self.utxo_delta(scripthash, oldutxos, blockheight + 1, usize::MAX),
         )?;
 
         // save updated utxo set to cache
         if let Some(lastblock) = lastblock {
             if had_cache || processed_items > MIN_HISTORY_ITEMS_TO_CACHE {
-                self.store.cache_db.write(
+                self.store.utxos_cache_db.write(
                     vec![UtxoCacheRow::new(scripthash, &newutxos, &lastblock).into_row()],
                     flush,
                 );
@@ -1150,6 +1199,7 @@ impl ChainQuery {
         // format as Utxo objects
         Ok(newutxos
             .into_iter()
+            .take(limit)
             .map(|(outpoint, (blockid, value))| {
                 // in elements/liquid chains, we have to lookup the txo in order to get its
                 // associated asset. the asset information could be kept in the db history rows
@@ -1229,7 +1279,7 @@ impl ChainQuery {
         // invalidates the cache if the block was orphaned or if values are out of sync.
         let cache: Option<(ScriptStats, usize)> = self
             .store
-            .cache_db
+            .stats_cache_db
             .get(&StatsCacheRow::key(scripthash))
             .map(|c| bincode_util::deserialize_little::<(ScriptStats, BlockHash)>(&c).unwrap())
             // Check that the values are sane (No negative balances or balances with 0 utxos)
@@ -1248,7 +1298,7 @@ impl ChainQuery {
         // save updated stats to cache
         if let Some(lastblock) = lastblock {
             if newstats.funded_txo_count + newstats.spent_txo_count > MIN_HISTORY_ITEMS_TO_CACHE {
-                self.store.cache_db.write(
+                self.store.stats_cache_db.write(
                     vec![StatsCacheRow::new(scripthash, &newstats, &lastblock).into_row()],
                     flush,
                 );
